@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,20 +20,17 @@
 #define SERVER_IP   "127.0.0.1"
 #define SERVER_PORT 8080
 
-
 static int uffd;
 static char *region;
 
-
-
-static int
-http_get_page(int page, char *buffer)
+static int http_get_page(int page, char *buffer)
 {
     int sock;
     struct sockaddr_in addr;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == -1) {
+    if (sock == -1)
+    {
         perror("socket");
         return -1;
     }
@@ -45,32 +40,34 @@ http_get_page(int page, char *buffer)
     addr.sin_family = AF_INET;
     addr.sin_port = htons(SERVER_PORT);
 
-    if (inet_pton(AF_INET, SERVER_IP, &addr.sin_addr) != 1) {
+    if (inet_pton(AF_INET, SERVER_IP, &addr.sin_addr) != 1)
+    {
         perror("inet_pton");
         close(sock);
         return -1;
     }
 
-    if (connect(sock,
-                (struct sockaddr *)&addr,
-                sizeof(addr)) == -1) {
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == -1)
+    {
         perror("connect");
         close(sock);
         return -1;
     }
 
-
     char request[256];
 
-    snprintf(request,
-             sizeof(request),
-             "GET /page/%d HTTP/1.0\r\n"
-             "Host: " SERVER_IP "\r\n"
-             "Connection: close\r\n"
-             "\r\n",
-             page);
+    snprintf(
+        request,
+        sizeof(request),
+        "GET /page/%d HTTP/1.0\r\n"
+        "Host: " SERVER_IP "\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        page
+    );
 
-    if (write(sock, request, strlen(request)) < 0) {
+    if (write(sock, request, strlen(request)) < 0)
+    {
         perror("write");
         close(sock);
         return -1;
@@ -79,15 +76,22 @@ http_get_page(int page, char *buffer)
     char response[8192];
     size_t total = 0;
 
-    while (total < sizeof(response) - 1) {
-        ssize_t n = read(sock,
-                         response + total,
-                         sizeof(response) - 1 - total);
+    while (total < sizeof(response) - 1)
+    {
+
+        ssize_t n = read(
+            sock, 
+            response + total, 
+            sizeof(response) - 1 - total
+        );
 
         if (n == 0)
+        {
             break;
+        }
 
-        if (n < 0) {
+        if (n < 0)
+        {
             perror("read");
             close(sock);
             return -1;
@@ -100,211 +104,174 @@ http_get_page(int page, char *buffer)
 
     response[total] = '\0';
 
-
     char *body = strstr(response, "\r\n\r\n");
 
-    if (!body) {
+    if (!body)
+    {
         fprintf(stderr, "Invalid HTTP response\n");
         return -1;
     }
 
     body += 4;
 
-
     size_t body_size = total - (body - response);
 
     if (body_size > PAGE_SIZE)
+    {
         body_size = PAGE_SIZE;
+    }
 
     memcpy(buffer, body, body_size);
-
-    /*
-     * Jeżeli serwer zwrócił mniej niż 4096 bajtów,
-     * wyzeruj resztę.
-     */
-    if (body_size < PAGE_SIZE)
-        memset(buffer + body_size,
-               0,
-               PAGE_SIZE - body_size);
 
     return 0;
 }
 
-
 /*
- * Thread obsługujący page faults.
+ * Thread handling page faults.
  */
-static void *
-fault_handler(void *arg)
+static void *fault_handler(void *arg)
 {
-    (void)arg;
-
+    
     struct pollfd pollfd;
-
     char page[PAGE_SIZE];
 
-
-    for (;;) {
+    for (;;)
+    {
 
         pollfd.fd = uffd;
         pollfd.events = POLLIN;
 
         int n = poll(&pollfd, 1, -1);
-        // int n = poll(&pollfd, 1, 100);
 
-        if (n == -1) {
+        if (n == -1)
+        {
             perror("poll");
             exit(EXIT_FAILURE);
         }
-
 
         struct uffd_msg msg;
 
         ssize_t nr = read(uffd, &msg, sizeof(msg));
 
-        if (nr <= 0) {
+        if (nr <= 0)
+        {
             perror("read(userfaultfd)");
             exit(EXIT_FAILURE);
         }
 
-
-        if (msg.event != UFFD_EVENT_PAGEFAULT) {
-            fprintf(stderr,
-                    "Unexpected userfault event: %u\n",
-                    msg.event);
-
+        if (msg.event != UFFD_EVENT_PAGEFAULT)
+        {
+            fprintf(
+                stderr,
+                "Unexpected userfault event: %u\n",
+                msg.event
+            );
             continue;
         }
 
+        /*
+         * The memory address that the process attempted to access.
+         */
+        unsigned long fault_address = msg.arg.pagefault.address;
 
         /*
-         * Adres pamięci, którego proces próbował użyć.
+         * Align the address to the beginning of the page.
          */
-        unsigned long fault_address =
-            msg.arg.pagefault.address;
-
+        unsigned long page_address = fault_address & ~(PAGE_SIZE - 1);
 
         /*
-         * Zaokrąglamy adres do początku strony.
+         * Calculate the page number.
          */
-        unsigned long page_address =
-            fault_address & ~(PAGE_SIZE - 1);
+        int page_number = (page_address - (unsigned long)region) / PAGE_SIZE;
 
+        printf("PAGE FAULT: page=%d\n", page_number);
 
         /*
-         * Obliczamy numer strony.
+         * Fetch the page.
          */
-        int page_number =
-            (page_address - (unsigned long)region)
-            / PAGE_SIZE;
-
-
-        printf("PAGE FAULT: page=%d\n",
-               page_number);
-
-
-        /*
-         * Pobieramy stronę.
-         */
-        if (http_get_page(page_number, page) != 0) {
-            fprintf(stderr,
-                    "HTTP fetch failed for page %d\n",
-                    page_number);
-
+        if (http_get_page(page_number, page) != 0)
+        {
+            fprintf(
+                stderr,
+                "HTTP fetch failed for page %d\n",
+                page_number
+            );
             exit(EXIT_FAILURE);
         }
 
-
         /*
-         * Dostarczamy pobraną stronę do procesu.
+         * rovide the fetched page to the process.
          */
         struct uffdio_copy copy;
 
         memset(&copy, 0, sizeof(copy));
-
-        copy.src =
-            (unsigned long)page;
-
-        copy.dst =
-            page_address;
-
-        copy.len =
-            PAGE_SIZE;
-
+        copy.src = (unsigned long)page;
+        copy.dst = page_address;
+        copy.len = PAGE_SIZE;
         copy.mode = 0;
 
 
-        if (ioctl(uffd,
-                  UFFDIO_COPY,
-                  &copy) == -1) {
-
+        if (ioctl(uffd, UFFDIO_COPY, &copy) == -1)
+        {
             perror("UFFDIO_COPY");
             exit(EXIT_FAILURE);
         }
-
-
-        printf("  -> fetched page %d from LAN\n",
-               page_number);
+        printf("fetched page %d\n", page_number);
     }
-
     return NULL;
 }
 
-
-int
-main(void)
+int main(void)
 {
-
 
     size_t length = NUM_PAGES * PAGE_SIZE;
 
     /*
-     * 1. Tworzymy userfaultfd.
-        Opcja 2 — włączenie userfaultfd dla zwykłych użytkowników
-            Możesz też zmienić sysctl:
-            cat /proc/sys/vm/unprivileged_userfaultfd
-            Jeśli dostajesz:
-            0
-            tymczasowo:
-            sudo sysctl -w vm.unprivileged_userfaultfd=1
-            albo UFFD_USER_MODE_ONLY
+     * UFFD_USER_MODE_ONLY restricts userfaultfd to handling page faults
+     * generated by user-space code.
+     *
+     * This allows an unprivileged process to use userfaultfd for
+     * user-space page faults, without requiring root privileges,
+     * depending on the kernel configuration.
+     *
+     * If userfaultfd creation fails with EPERM, check:
+     *
+     *     cat /proc/sys/vm/unprivileged_userfaultfd
+     *
+     * If it is set to 0, unprivileged userfaultfd may be disabled.
+     * It can be temporarily enabled with:
+     *
+     *     sudo sysctl -w vm.unprivileged_userfaultfd=1
+     *
+     * Alternatively, running the program with sudo provides the
+     * required privileges.
      */
     uffd = syscall(
         SYS_userfaultfd,
         O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY
     );
 
-    if (uffd == -1) {
+    if (uffd == -1)
+    {
         perror("userfaultfd");
-
-        fprintf(stderr,
-                "\nJeżeli dostajesz EPERM, sprawdź "
-                "ustawienia userfaultfd w kernelu.\n");
-
         return 1;
     }
 
-
     /*
-     * 2. Włączamy API.
+     * Enable the API. 
      */
     struct uffdio_api api;
 
     memset(&api, 0, sizeof(api));
-
     api.api = UFFD_API;
-
-    if (ioctl(uffd,
-              UFFDIO_API,
-              &api) == -1) {
-
+    if (ioctl(uffd, UFFDIO_API, &api) == -1)
+    {
         perror("UFFDIO_API");
         return 1;
     }
 
-
     /*
-     * 3. Rezerwujemy anonimową pamięć.
+     * Allocate anonymous memory.
      */
     region = mmap(
         NULL,
@@ -315,82 +282,65 @@ main(void)
         0
     );
 
-    if (region == MAP_FAILED) {
+    if (region == MAP_FAILED)
+    {
         perror("mmap");
         return 1;
     }
 
-
     /*
-     * 4. Rejestrujemy region jako MISSING.
+     * Register the region in MISSING mode.
      */
     struct uffdio_register reg;
 
     memset(&reg, 0, sizeof(reg));
 
-    reg.range.start =
-        (unsigned long)region;
+    reg.range.start = (unsigned long)region;
+    reg.range.len = length;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
 
-    reg.range.len =
-        length;
-
-    reg.mode =
-        UFFDIO_REGISTER_MODE_MISSING;
-
-
-    if (ioctl(uffd,
-              UFFDIO_REGISTER,
-              &reg) == -1) {
-
+    if (ioctl(uffd, UFFDIO_REGISTER, &reg) == -1)
+    {
         perror("UFFDIO_REGISTER");
         return 1;
     }
 
-
     /*
-     * 5. Uruchamiamy thread obsługujący page faults.
+     * Start the thread that handles page faults.
      */
     pthread_t thread;
 
-    if (pthread_create(
-            &thread,
-            NULL,
-            fault_handler,
-            NULL) != 0) {
-
+    if (pthread_create(&thread, NULL, fault_handler, NULL) != 0)
+    {
         perror("pthread_create");
         return 1;
     }
+
     pthread_detach(thread);
-
-
-    printf("Virtual memory: %zu bytes\n", length);
-    printf("Starting test...\n\n");
-
+    printf("Anonymous memory: %zu bytes\n", length);
 
     /*
-     * 6. Teraz najważniejsza część.
+     * Now comes the most important part.
      *
-     * Ten kod wygląda jak zwykły dostęp do RAM.
+     * This code looks like a regular memory access.
      *
-     * Ale pierwsze odwołanie do każdej strony powoduje:
+     * However, the first access to each page causes:
      *
      *   page fault
-     *       ↓
      *   userfaultfd
-     *       ↓
      *   HTTP GET
-     *       ↓
      *   UFFDIO_COPY
-     *       ↓
-     *   instrukcja zostaje wznowiona
+     *   the instruction is resumed
      */
-    for (int i = 0; i < NUM_PAGES; i++) {
-
+    for (int i = 0; i < NUM_PAGES; i++)
+    {
         printf("Reading page %d...\n", i);
+
         // musimy dotknąć strony inaczej nie będzie page fault
         volatile unsigned char value = region[i * PAGE_SIZE];
         char * c = region + i * PAGE_SIZE;
+        c[0] = 'X';
+        
         printf("value = %s\n\n", c);
 
         /** 

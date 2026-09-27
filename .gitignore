@@ -1,1 +1,6 @@
-demo
+demo__pycache__/*
+article/418_teafault.aux
+article/418_teafault.log
+article/418_teafault.out
+article/texput.log
+client
