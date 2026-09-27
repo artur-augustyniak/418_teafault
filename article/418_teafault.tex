@@ -161,11 +161,11 @@ int main(void){
     pthread_detach(thread);
     for (int page = 0; page < NUM_PAGES; page++) {
         printf("Reading page %d...\n", page);
-        volatile unsigned char value = region[page * PAGE_SIZE];
-        char *address = region + page * PAGE_SIZE;
-        address[0] = 'X';
-        printf("value = %s\n\n", address);
-        madvise(address, PAGE_SIZE, MADV_DONTNEED);
+        char *page_start = region + page * PAGE_SIZE; 
+        volatile char value = *page_start;
+        // *(region + page * PAGE_SIZE) = 'X';
+        printf("value = %s\n\n", page_start);
+        madvise(page_start, PAGE_SIZE, MADV_DONTNEED);
     }
     volatile unsigned char value = region[0];
     printf("Reading page 0 again...\n");
@@ -173,6 +173,8 @@ int main(void){
     return 0;
 }
 \end{lstlisting}
+Funny trap, though. Using \texttt{printf()} in the fault handler means that if another \texttt{printf()} triggers a page fault, it can deadlock on the \texttt{stdout} lock. That's why we touch the page before printing.
+
 \vspace{-9pt}
 \subsection*{Under pressure}
 \vspace{-6pt}
@@ -181,11 +183,7 @@ Try running it with a tiny memory limit:
 python3 ./server.py
 gcc -pthread client.c -o client && systemd-run --user --scope -p MemoryMax=1M -p MemorySwapMax=0 ./client
 \end{lstlisting}
-
-To some extent,  the HTTP server has somehow become a rather questionable backing store.
-
-Less compressed, commented code with minimal error handling is available at
-\url{https://github.com/artur-augustyniak/418_teafault}.
-
+The HTTP server has somehow become a rather questionable backing store :)
+The code, with comments and minimal error handling, is available at \url{https://github.com/artur-augustyniak/418_teafault}.
 
 \end{document}

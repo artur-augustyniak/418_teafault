@@ -222,7 +222,7 @@ static void *fault_handler(void *arg)
 }
 
 int main(void)
-{
+{   
 
     size_t length = NUM_PAGES * PAGE_SIZE;
 
@@ -323,9 +323,7 @@ int main(void)
      * Now comes the most important part.
      *
      * This code looks like a regular memory access.
-     *
      * However, the first access to each page causes:
-     *
      *   page fault
      *   userfaultfd
      *   HTTP GET
@@ -336,28 +334,65 @@ int main(void)
     {
         printf("Reading page %d...\n", i);
 
-        // musimy dotknąć strony inaczej nie będzie page fault
-        volatile unsigned char value = region[i * PAGE_SIZE];
-        char * c = region + i * PAGE_SIZE;
-        c[0] = 'X';
         
-        printf("value = %s\n\n", c);
+        char *page_start = region + i * PAGE_SIZE; 
+        /*
+         * This is the funny part: we have printf() calls in the fault handler
+         * thread, so we can deadlock on stdout if the printf() below triggers
+         * a page fault while holding the stdout lock.
+         *
+         * We can avoid that by forcing the page fault before touching the page
+         * from inside printf(). Reading from or writing to the page will trigger
+         * the fault first, so by the time printf() accesses page_start, the page
+         * is already populated.
+         *
+         * Try commenting this out and leaving the printf() calls in
+         * fault_handler() — it should deadlock again.
+         *
+         * You can also try removing the printf() calls from fault_handler()
+         * and then this will work without forcing the page fault beforehand.
 
-        /** 
-        * przy ograniczeniu pamięci scope'em (i wyłaczonym swapie)
-        * bez tego oczekujemy crasha
-        *    Reading page 183...
-        *    PAGE FAULT: page=183
-        *    zsh: killed     systemd-run --user --scope -p MemoryMax=1M -p MemorySwapMax=0 ./demo
-        *
-        */
-        madvise(c, PAGE_SIZE, MADV_DONTNEED);
+         * In general, we should avoid using printf() (or other potentially 
+         * blocking/locking operations) in a userfaultfd fault handler. 
+         */
+        volatile char value = *page_start;
+        // *(region + i * PAGE_SIZE) = 'X';
+
+        printf("value = %s\n\n", page_start);
+
+        /**
+         * With a memory limit imposed by the systemd scope, we tell the kernel
+         * that the page is no longer needed and may be reclaimed.
+         *
+         * Without MADV_DONTNEED, subsequent page accesses would keep increasing
+         * the process's physical memory usage until MemoryMax is exceeded,
+         * which may cause the process to be killed by the OOM killer.
+         *
+         * If swap is enabled, the pages may instead be swapped out. To observe
+         * the difference, try commenting out MADV_DONTNEED and running the test
+         * both with swap enabled and with swap disabled:
+         *
+         *     systemd-run --user --scope -p MemoryMax=1M -p MemorySwapMax=0 ./client
+         *
+         * With swap disabled, the process is limited to physical memory and may
+         * be killed once the MemoryMax limit is reached. With swap enabled,
+         * the kernel may swap pages out instead of keeping them in physical memory.
+         */
+        madvise(page_start, PAGE_SIZE, MADV_DONTNEED);
     }
 
     /*
-     * Drugi odczyt tych samych stron
-     * NIE powinien powodować HTTP requestów, chyba że strony już nie ma
-     * 
+     * Read page 0 again.
+     *
+     * Since page 0 was previously marked with MADV_DONTNEED, the kernel may
+     * have reclaimed the page. If it was reclaimed, accessing it again will
+     * cause a page fault and the page will be fetched again via an HTTP request.
+     *
+     * If the page is still resident, no HTTP request should be generated.
+
+     * As above, we touch the page before printf() to trigger the page fault first. 
+     * Otherwise, printf() itself may trigger it while holding the stdout lock, 
+     * causing a deadlock with the fault handler.
      */
     volatile unsigned char value = region[0 * PAGE_SIZE];
     printf("Reading page 0 again...\n");
